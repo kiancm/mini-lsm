@@ -314,12 +314,22 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.state.read().memtable.put(key, value)
+        let capacity = {
+            let memtable = &self.state.read().memtable;
+            memtable.put(key, value)?;
+            memtable.approximate_size()
+        };
+
+        if capacity >= self.options.target_sst_size {
+            let guard = self.state_lock.lock();
+            self.force_freeze_memtable(&guard)?;
+        }
+        Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
-        self.state.read().memtable.put(key, &[])
+        self.put(key, &[])
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
@@ -344,7 +354,15 @@ impl LsmStorageInner {
 
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        unimplemented!()
+        let new_memtable = MemTable::create(self.next_sst_id());
+        let mut guard = self.state.write();
+        let mut state = guard.as_ref().clone();
+        let memtable = state.memtable.clone();
+        state.imm_memtables.insert(0, memtable);
+        state.memtable = new_memtable.into();
+        *guard = state.into();
+
+        Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk
