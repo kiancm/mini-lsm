@@ -17,13 +17,15 @@
 
 use std::cmp::{self};
 use std::collections::BinaryHeap;
+use std::collections::binary_heap::PeekMut;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::key::KeySlice;
 
 use super::StorageIterator;
 
+#[derive(Debug)]
 struct HeapWrapper<I: StorageIterator>(pub usize, pub Box<I>);
 
 impl<I: StorageIterator> PartialEq for HeapWrapper<I> {
@@ -59,28 +61,78 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let wrappers = iters
+            .into_iter()
+            .filter(|iter| iter.is_valid())
+            .enumerate()
+            .map(|(i, iter)| HeapWrapper(i, iter));
+        let mut iters = BinaryHeap::from_iter(wrappers);
+        let current = iters.pop();
+
+        Self { iters, current }
     }
 }
-
 impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIterator
     for MergeIterator<I>
 {
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        self.current
+            .as_ref()
+            .map(|wrapper| &wrapper.1)
+            .map(|iter| iter.key())
+            .unwrap_or_default()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.current
+            .as_ref()
+            .map(|wrapper| &wrapper.1)
+            .map(|iter| iter.value())
+            .unwrap_or_default()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.current
+            .as_ref()
+            .is_some_and(|wrapper| wrapper.1.is_valid())
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let current = self.current.as_mut().context("unwrapping current")?;
+        while let Some(mut peek) = self.iters.peek_mut() {
+            match peek.1.key().cmp(&current.1.key()) {
+                cmp::Ordering::Less => {}
+                cmp::Ordering::Equal => match peek.1.next() {
+                    Ok(_) => {
+                        if !peek.1.is_valid() {
+                            PeekMut::pop(peek);
+                        }
+                    }
+                    e @ Err(_) => {
+                        PeekMut::pop(peek);
+                        return e;
+                    }
+                },
+                cmp::Ordering::Greater => break,
+            }
+        }
+
+        current.1.next()?;
+
+        if !current.1.is_valid() {
+            if let Some(iter) = self.iters.pop() {
+                *current = iter;
+            };
+        }
+
+        if let Some(mut peek) = self.iters.peek_mut() {
+            if *current < *peek {
+                std::mem::swap(&mut *peek, current);
+            }
+        }
+
+        Ok(())
     }
 }
